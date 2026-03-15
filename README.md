@@ -2,8 +2,8 @@
 
 > AI-powered production incident investigation, log analysis, infrastructure metrics correlation, and automated remediation — built on **Amazon Bedrock AgentCore** and **AWS Lambda**.
 
-[![CI](https://github.com/your-org/cloudops-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/cloudops-ai-agent/actions/workflows/ci.yml)
-[![Deploy](https://github.com/your-org/cloudops-ai-agent/actions/workflows/deploy.yml/badge.svg)](https://github.com/your-org/cloudops-ai-agent/actions/workflows/deploy.yml)
+[![CI](https://github.com/Soumya14041987/cloudops-ai-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Soumya14041987/cloudops-ai-agent/actions/workflows/ci.yml)
+[![Deploy](https://github.com/Soumya14041987/cloudops-ai-agent/actions/workflows/deploy.yml/badge.svg)](https://github.com/Soumya14041987/cloudops-ai-agent/actions/workflows/deploy.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -197,7 +197,7 @@ cloudops-ai-agent/
 ### 1. Clone & install
 
 ```bash
-git clone https://github.com/your-org/cloudops-ai-agent.git
+git clone https://github.com/Soumya14041987/cloudops-ai-agent.git
 cd cloudops-ai-agent
 
 python -m venv .venv
