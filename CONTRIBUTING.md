@@ -5,7 +5,7 @@ Thank you for taking the time to contribute to CloudOps AI Agent!
 ## Development Setup
 
 ```bash
-git clone https://github.com/your-org/cloudops-ai-agent.git
+git clone https://github.com/Soumya14041987/cloudops-ai-agent.git
 cd cloudops-ai-agent
 
 # Create venv and install all dependencies
@@ -90,7 +90,7 @@ make env
 
 ## Reporting Issues
 
-Please use [GitHub Issues](https://github.com/your-org/cloudops-ai-agent/issues) and include:
+Please use [GitHub Issues](https://github.com/Soumya14041987/cloudops-ai-agent/issues) and include:
 
 - Python version (`python --version`)
 - boto3 version (`pip show boto3`)
