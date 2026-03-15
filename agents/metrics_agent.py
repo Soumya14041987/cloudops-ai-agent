@@ -19,6 +19,7 @@ import statistics
 from typing import Optional
 import boto3
 from botocore.exceptions import ClientError
+from agents.model_adapter import get_adapter
 
 from tools.cloudwatch_metrics import CloudWatchMetricsTool, CloudWatchMetricsError
 
@@ -193,7 +194,7 @@ class MetricsAgent:
         self.model_id     = bedrock_model_id
         self.region       = region_name
         self.detector     = AnomalyDetector()
-        self._bedrock     = boto3.client("bedrock-runtime", region_name=region_name)
+        self._adapter     = get_adapter(region_name)
         logger.info("MetricsAgent ready")
 
     # ── public ────────────────────────────────
@@ -403,7 +404,7 @@ Provide a concise JSON object (no markdown fences) with:
                 "max_tokens":        512,
                 "messages":          [{"role": "user", "content": prompt}],
             })
-            response = self._bedrock.invoke_model(
+            response = # legacy - see adapter(
                 modelId     = self.model_id,
                 contentType = "application/json",
                 accept      = "application/json",

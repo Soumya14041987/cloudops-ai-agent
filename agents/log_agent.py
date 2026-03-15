@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Optional
 import boto3
 from botocore.exceptions import ClientError
+from agents.model_adapter import get_adapter
 
 from tools.cloudwatch_logs import CloudWatchLogsTool, CloudWatchLogsError
 
@@ -226,7 +227,7 @@ class LogAgent:
         self.region        = region_name
         self.pattern_lib   = LogPatternLibrary()
         self.correlator    = LogCorrelationEngine()
-        self._bedrock      = boto3.client("bedrock-runtime", region_name=region_name)
+        self._adapter      = get_adapter(region_name)
         logger.info("LogAgent ready")
 
     # ── public ────────────────────────────────
@@ -415,7 +416,7 @@ Return a JSON object (no markdown fences) with:
                 "max_tokens":        768,
                 "messages":          [{"role": "user", "content": prompt}],
             })
-            response = self._bedrock.invoke_model(
+            response = # legacy - see adapter(
                 modelId     = self.model_id,
                 contentType = "application/json",
                 accept      = "application/json",

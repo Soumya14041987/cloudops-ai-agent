@@ -19,6 +19,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 import boto3
 from botocore.exceptions import ClientError
+from agents.model_adapter import get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +317,7 @@ class RemediationAgent:
         self.auto_execute = auto_execute
         self.dry_run      = dry_run
         self.catalogue    = RemediationCatalogue()
-        self._bedrock     = boto3.client("bedrock-runtime", region_name=region_name)
+        self._adapter     = get_adapter(region_name)
         logger.info(
             "RemediationAgent ready (auto_execute=%s, dry_run=%s)",
             auto_execute, dry_run,
@@ -508,7 +509,7 @@ Produce a JSON object (no markdown fences) with:
                 "max_tokens":        1024,
                 "messages":          [{"role": "user", "content": prompt}],
             })
-            response = self._bedrock.invoke_model(
+            response = # legacy - see adapter(
                 modelId     = self.model_id,
                 contentType = "application/json",
                 accept      = "application/json",

@@ -23,6 +23,7 @@ import boto3
 from datetime import datetime, timezone
 from typing import Optional
 from botocore.exceptions import ClientError
+from agents.model_adapter import get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ class IncidentAgent:
         self.model_id   = bedrock_model_id
         self.region     = region_name
         self.max_tokens = max_tokens
-        self._bedrock   = boto3.client("bedrock-runtime", region_name=region_name)
+        self._adapter   = get_adapter(region_name)
         logger.info("IncidentAgent ready (model=%s)", bedrock_model_id)
 
     # ── public ────────────────────────────────
@@ -257,24 +258,13 @@ Produce a JSON object (no markdown fences) with these exact keys:
   "risk_assessment" – one sentence on blast radius / customer impact
 """
         try:
-            body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens":        self.max_tokens,
-                "messages":          [{"role": "user", "content": prompt}],
-            })
-            response = self._bedrock.invoke_model(
-                modelId     = self.model_id,
-                contentType = "application/json",
-                accept      = "application/json",
-                body        = body,
+            result = self._adapter.invoke_json(
+                model_id   = self.model_id,
+                prompt     = prompt,
+                max_tokens = self.max_tokens,
             )
-            raw = json.loads(response["body"].read())
-            content = raw.get("content", [{}])[0].get("text", "")
-            # Validate it is JSON
-            parsed = json.loads(content)
-            return json.dumps(parsed, indent=2)
-
-        except (ClientError, json.JSONDecodeError, KeyError) as exc:
+            return json.dumps(result, indent=2)
+        except Exception as exc:
             logger.warning("Bedrock triage failed (%s); using fallback.", exc)
             return self._fallback_triage(description, severity, resources, symptoms)
 
