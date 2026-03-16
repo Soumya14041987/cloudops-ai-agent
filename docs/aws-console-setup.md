@@ -33,7 +33,7 @@ Before starting, ensure you have:
 - [ ] The project cloned: `git clone https://github.com/YOUR_USERNAME/cloudops-ai-agent.git`
 - [ ] AWS region decided — this guide uses **us-east-1** throughout. Replace with your chosen region.
 
-> **Region note:** Amazon Bedrock (Claude models) is available in `us-east-1`, `us-west-2`, `eu-west-1`, and others. Check [Bedrock model availability](https://docs.aws.amazon.com/bedrock/latest/userguide/models-regions.html) for your region.
+> **Region note:** Amazon Bedrock (Amazon Nova models) is available in `us-east-1`, `us-west-2`, `eu-west-1`, and others. Check [Bedrock model availability](https://docs.aws.amazon.com/bedrock/latest/userguide/models-regions.html) for your region.
 
 ---
 
@@ -536,7 +536,7 @@ Create as inline policy → name it `CloudOpsGitHubDeployPolicy`.
 | `AWS_ROLE_ARN` | `arn:aws:iam::YOUR_ACCOUNT:role/cloudops-ai-agent-github-actions` |
 | `AWS_REGION` | `us-east-1` |
 | `LAMBDA_FUNCTION_NAME` | `cloudops-ai-agent` |
-| `BEDROCK_MODEL_ID` | `anthropic.claude-3-sonnet-20240229-v1:0` |
+| `BEDROCK_MODEL_ID` | `amazon.nova-pro-v1:0` |
 
 3. Now every push to `main` will automatically deploy via GitHub Actions.
 
@@ -547,7 +547,7 @@ Create as inline policy → name it `CloudOpsGitHubDeployPolicy`.
 Run through these checks after completing all steps:
 
 ### Infrastructure
-- [ ] Bedrock model access granted for Claude 3 Sonnet
+- [ ] Bedrock model access granted for amazon.nova-pro-v1:0
 - [ ] IAM role `cloudops-ai-agent-lambda-role` exists with correct policies
 - [ ] Lambda function `cloudops-ai-agent` exists, runtime Python 3.11, handler `app.lambda_handler`
 - [ ] Lambda timeout = 300s, memory = 512 MB
@@ -583,14 +583,13 @@ Based on moderate production usage (100 incidents/day):
 | Service | Usage | Est. Monthly Cost |
 |---------|-------|------------------|
 | AWS Lambda | 100 invocations × 4s × 512 MB/day | ~$0.50 |
-| Amazon Bedrock (Claude 3 Sonnet) | 4 calls × 1000 tokens input + 500 output per incident | ~$15–25 |
+| Amazon Bedrock (Amazon Nov Pro) | 4 calls × 1000 tokens input + 500 output per incident | ~$15–25 |
 | CloudWatch Logs | ~50 MB/day ingestion | ~$1.50 |
 | CloudWatch Metrics | 10 GetMetricData calls per incident | ~$1.00 |
 | API Gateway | 100 requests/day | ~$0.10 |
 | DynamoDB | On-demand, ~1 KB per incident | ~$0.25 |
 | **Total** | | **~$20–30/month** |
 
-> The dominant cost is **Bedrock** (4 Claude calls per incident). Reduce cost by switching to Claude 3 Haiku for non-critical stages.
 
 ---
 
