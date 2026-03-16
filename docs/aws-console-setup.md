@@ -97,7 +97,7 @@ Then click **Create policy** (inline, for Bedrock and Lambda concurrency):
       "Sid": "BedrockInvoke",
       "Effect": "Allow",
       "Action": ["bedrock:InvokeModel"],
-      "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-sonnet*"
+      "Resource": "arn:aws:bedrock:*::foundation-model/amazon.nova-pro-v1:0"
     },
     {
       "Sid": "LambdaConcurrency",
