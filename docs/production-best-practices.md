@@ -1,846 +1,1285 @@
-# Production Best Practices — CloudOps AI Agent
+# 9️⃣ Production Best Practices — CloudOps AI Agent
 
-> A comprehensive guide covering security, observability, reliability, cost optimisation,
-> and operational excellence for running the CloudOps AI Agent at production scale.
+> A complete, battle-tested guide for running the CloudOps AI Agent reliably,
+> securely, and cost-effectively at production scale on AWS.
+> Every section includes copy-paste code, exact AWS Console steps, and
+> thresholds tuned specifically for this project.
 
 ---
 
 ## Table of Contents
 
-1. [Security](#1-security)
-2. [Observability & Monitoring](#2-observability--monitoring)
-3. [Reliability & Resilience](#3-reliability--resilience)
-4. [Performance & Scalability](#4-performance--scalability)
+1. [Security Hardening](#1-security-hardening)
+2. [Observability and Monitoring](#2-observability-and-monitoring)
+3. [Reliability and Resilience](#3-reliability-and-resilience)
+4. [Performance and Scalability](#4-performance-and-scalability)
 5. [Cost Optimisation](#5-cost-optimisation)
-6. [CI/CD & Deployment](#6-cicd--deployment)
-7. [Model & AI Best Practices](#7-model--ai-best-practices)
-8. [Incident Response](#8-incident-response)
-9. [Compliance & Data Governance](#9-compliance--data-governance)
-10. [Production Readiness Checklist](#10-production-readiness-checklist)
+6. [CI/CD and Zero-Downtime Deployment](#6-cicd-and-zero-downtime-deployment)
+7. [AI and Model Governance](#7-ai-and-model-governance)
+8. [Incident Response Runbooks](#8-incident-response-runbooks)
+9. [Compliance and Data Governance](#9-compliance-and-data-governance)
 
 ---
 
-## 1. Security
+## 1. Security Hardening
 
-### 1.1 IAM — Least Privilege
+### 1.1 IAM — Principle of Least Privilege
 
-Never use `AdministratorAccess`. The Lambda role should have only what it needs:
+The Lambda execution role should contain only what each AWS service needs.
+Replace your current wildcard policy with this scoped version:
 
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "BedrockScopedModels",
+      "Sid": "LambdaLogs",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/lambda/cloudops-ai-agent:*"
+    },
+    {
+      "Sid": "BedrockInvokeScopedModels",
       "Effect": "Allow",
       "Action": ["bedrock:InvokeModel"],
       "Resource": [
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet*",
-        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova*"
+        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0",
+        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-lite-v1:0",
+        "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-micro-v1:0",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet*"
       ]
     },
     {
-      "Sid": "CloudWatchLogsScoped",
+      "Sid": "CloudWatchMetricsRead",
       "Effect": "Allow",
-      "Action": ["logs:FilterLogEvents", "logs:GetLogEvents"],
+      "Action": ["cloudwatch:GetMetricData", "cloudwatch:DescribeAlarms"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogsRead",
+      "Effect": "Allow",
+      "Action": [
+        "logs:FilterLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:GetLogEvents"
+      ],
       "Resource": "arn:aws:logs:us-east-1:ACCOUNT_ID:log-group:/aws/*:*"
     },
     {
-      "Sid": "CloudWatchMetricsReadOnly",
+      "Sid": "DynamoDBIncidentHistory",
       "Effect": "Allow",
-      "Action": ["cloudwatch:GetMetricData"],
-      "Resource": "*"
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:GetItem",
+        "dynamodb:Query"
+      ],
+      "Resource": "arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/cloudops-incidents"
+    },
+    {
+      "Sid": "LambdaConcurrencyUpdate",
+      "Effect": "Allow",
+      "Action": ["lambda:PutFunctionConcurrency"],
+      "Resource": "arn:aws:lambda:us-east-1:ACCOUNT_ID:function:*"
     }
   ]
 }
 ```
 
-> Rule: Start with `Resource: "*"` during development, narrow to specific ARNs before production.
-
-### 1.2 Secrets — Never in Environment Variables
-
-| What | Bad practice | Good practice |
-|------|-------------|---------------|
-| API keys | Lambda env var (plaintext) | AWS Secrets Manager |
-| Slack webhook | Lambda env var | Secrets Manager + rotation |
-| DB passwords | Hardcoded in code | SSM Parameter Store (SecureString) |
-| Model IDs | Hardcoded | SSM Parameter Store |
-
-```python
-# Good — fetch from Secrets Manager at cold start (cached for warm invocations)
-import boto3, json
-_secrets_cache = {}
-
-def get_secret(secret_name: str) -> dict:
-    if secret_name not in _secrets_cache:
-        client = boto3.client("secretsmanager")
-        response = client.get_secret_value(SecretId=secret_name)
-        _secrets_cache[secret_name] = json.loads(response["SecretString"])
-    return _secrets_cache[secret_name]
-```
-
-### 1.3 API Gateway — Authentication
-
-For production, never leave the API endpoint unauthenticated:
-
-```
-Option A — API Key (simplest):
-  API Gateway → Usage Plans → API Keys → require key in x-api-key header
-
-Option B — IAM Auth (for AWS-to-AWS calls):
-  Method Request → Authorization → AWS_IAM
-
-Option C — Cognito (for user-facing apps):
-  Attach a Cognito User Pool Authorizer to the POST /investigate method
-
-Option D — Lambda Authorizer (custom JWT/OIDC):
-  Write a separate Lambda that validates tokens before CloudOps runs
-```
-
-### 1.4 Network Isolation — VPC
-
-For production deployments that touch internal databases or private APIs:
-
-```
-1. Deploy Lambda inside a VPC
-   - Private subnet (no direct internet access)
-   - NAT Gateway for outbound calls (Bedrock, CloudWatch)
-
-2. VPC Endpoints (stay on AWS backbone — no NAT needed):
-   - com.amazonaws.us-east-1.bedrock-runtime
-   - com.amazonaws.us-east-1.logs
-   - com.amazonaws.us-east-1.monitoring
-
-3. Security Group on Lambda:
-   - Outbound: 443 to VPC endpoints only
-   - Inbound: none
-```
-
-### 1.5 Encryption
-
-| Layer | Encryption |
-|-------|-----------|
-| DynamoDB at rest | AWS-owned KMS key (default) or CMK |
-| CloudWatch Logs | KMS CMK for sensitive log data |
-| Lambda env vars | KMS encryption enabled |
-| Bedrock requests | TLS 1.2+ in transit (automatic) |
-| S3 deployment bucket | SSE-S3 or SSE-KMS |
+> Rule: Start with `Resource: "*"` during development. Before production,
+> replace every `*` with the exact ARN.
 
 ---
 
-## 2. Observability & Monitoring
+### 1.2 Never Store Secrets in Environment Variables
 
-### 2.1 Structured Logging
+| What | Bad practice | Good practice |
+|------|-------------|---------------|
+| Slack webhook URL | Lambda env var (plaintext) | AWS Secrets Manager |
+| PagerDuty routing key | Hardcoded in code | Secrets Manager + auto-rotation |
+| Database passwords | `.env` file | SSM Parameter Store (SecureString) |
+| API tokens | Git repo | Secrets Manager |
 
-Replace the default logging with structured JSON — makes CloudWatch Logs Insights queries 10x faster:
+Fetch secrets at cold start (cached for warm invocations):
 
 ```python
-# Add to app.py before any logger usage
-import json, logging
+# agents/secrets.py
+import boto3, json, logging
 
-class JSONFormatter(logging.Formatter):
-    def format(self, record):
-        log_obj = {
+logger = logging.getLogger(__name__)
+_cache: dict = {}
+
+def get_secret(secret_name: str, region: str = "us-east-1") -> dict:
+    """
+    Fetch from Secrets Manager. Cached per Lambda container lifecycle.
+    Fetched only once per cold start — free on warm invocations.
+    """
+    if secret_name not in _cache:
+        client = boto3.client("secretsmanager", region_name=region)
+        response = client.get_secret_value(SecretId=secret_name)
+        _cache[secret_name] = json.loads(response["SecretString"])
+        logger.info("Secret loaded: %s", secret_name)
+    return _cache[secret_name]
+
+def get_ssm_param(param_name: str, region: str = "us-east-1") -> str:
+    """Fetch a single SecureString from SSM Parameter Store."""
+    client = boto3.client("ssm", region_name=region)
+    return client.get_parameter(Name=param_name, WithDecryption=True)["Parameter"]["Value"]
+```
+
+---
+
+### 1.3 API Gateway Authentication
+
+For production every endpoint must require authentication.
+
+Option A — API Key (simplest, 2 minutes):
+```
+API Gateway -> cloudops-ai-agent -> Usage Plans -> Create plan
+  Name: CloudOpsUsagePlan
+  Throttling: 100 req/sec, Burst: 200
+  Quota: 10,000 req/day
+-> API Keys -> Create key -> Auto Generate
+-> Associate key with usage plan
+-> Method Request -> API Key Required: true
+```
+
+Call with:
+```bash
+curl -X POST https://YOUR_API.execute-api.us-east-1.amazonaws.com/prod/investigate \
+  -H "x-api-key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"incident_description": "Lambda has errors"}'
+```
+
+Option B — IAM Auth (for internal AWS services):
+```
+Method Request -> Authorization -> AWS_IAM
+Callers sign requests with AWS Signature Version 4
+```
+
+---
+
+### 1.4 VPC Network Isolation
+
+```
+Architecture:
+  Lambda (private subnet) -> NAT Gateway -> Internet (Bedrock, CloudWatch)
+                          -> VPC Endpoints -> AWS APIs (free, faster, stays on backbone)
+
+VPC Endpoints to create (Interface type):
+  com.amazonaws.us-east-1.bedrock-runtime
+  com.amazonaws.us-east-1.logs
+  com.amazonaws.us-east-1.monitoring
+  com.amazonaws.us-east-1.secretsmanager
+  com.amazonaws.us-east-1.ssm
+
+Lambda Security Group:
+  Inbound:  None
+  Outbound: TCP 443 to VPC Endpoint security group only
+```
+
+---
+
+### 1.5 Encryption at Every Layer
+
+| Layer | Key type | Where to enable |
+|-------|----------|-----------------|
+| Lambda env vars | KMS CMK | Configuration -> Encryption -> Customer managed key |
+| CloudWatch Logs | KMS CMK | Log group -> Actions -> Associate KMS key |
+| DynamoDB | KMS CMK | Table -> Additional settings -> Encryption |
+| S3 deployment bucket | SSE-S3 | Bucket -> Properties -> Default encryption |
+| Secrets Manager | KMS CMK | Secret -> Encryption key -> Choose CMK |
+
+---
+
+### 1.6 Security Scanning in CI
+
+Add to `.github/workflows/ci.yml`:
+
+```yaml
+security-scan:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Scan for secrets (Gitleaks)
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Dependency vulnerability scan (Safety)
+      run: |
+        pip install safety
+        safety check -r requirements.txt --output text
+
+    - name: Static analysis (Bandit)
+      run: |
+        pip install bandit
+        bandit -r agents/ tools/ app.py -ll -ii
+```
+
+---
+
+## 2. Observability and Monitoring
+
+### 2.1 Structured JSON Logging
+
+Replace the default logging format with structured JSON.
+This makes CloudWatch Logs Insights queries 10x faster and enables
+metric filters, alerting on specific fields, and dashboards.
+
+```python
+# app.py — add at the very top, before any logger usage
+import json, logging, os
+
+class StructuredJSONFormatter(logging.Formatter):
+    """Single-line JSON per record. Compatible with CW Logs Insights."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
             "timestamp":   self.formatTime(record),
             "level":       record.levelname,
             "logger":      record.name,
             "message":     record.getMessage(),
-            "request_id":  getattr(record, "request_id", ""),
+            "function":    os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "local"),
+            "request_id":  getattr(record, "aws_request_id", ""),
             "incident_id": getattr(record, "incident_id", ""),
+            "stage":       getattr(record, "stage", ""),
+            "duration_ms": getattr(record, "duration_ms", None),
         }
+        entry = {k: v for k, v in entry.items() if v is not None and v != ""}
         if record.exc_info:
-            log_obj["exception"] = self.formatException(record.exc_info)
-        return json.dumps(log_obj)
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, default=str)
 
-handler = logging.StreamHandler()
-handler.setFormatter(JSONFormatter())
-logging.root.handlers = [handler]
-logging.root.setLevel(logging.INFO)
+def configure_logging() -> None:
+    root = logging.getLogger()
+    root.handlers.clear()
+    handler = logging.StreamHandler()
+    handler.setFormatter(StructuredJSONFormatter())
+    root.addHandler(handler)
+    root.setLevel(getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO))
+
+configure_logging()
 ```
 
-Then query in CloudWatch Logs Insights:
+CloudWatch Logs Insights queries:
+
 ```sql
-fields @timestamp, incident_id, level, message
+-- All errors in the last hour
+fields @timestamp, incident_id, message
 | filter level = "ERROR"
 | sort @timestamp desc
 | limit 50
+
+-- Average pipeline duration per hour
+fields incident_id, duration_ms
+| filter stage = "pipeline_complete"
+| stats avg(duration_ms), max(duration_ms) by bin(1h)
+
+-- Failed Bedrock calls
+fields @timestamp, message, incident_id
+| filter message like /Bedrock.*failed/
+| sort @timestamp desc
 ```
+
+---
 
 ### 2.2 Custom CloudWatch Metrics
 
-Emit custom metrics per pipeline stage for dashboards and alarms:
-
 ```python
-import boto3
-cw = boto3.client("cloudwatch")
+# app.py — add metric emission helper
+_cw_client = boto3.client("cloudwatch", region_name=os.getenv("AWS_REGION", "us-east-1"))
 
-def emit_metric(name: str, value: float, unit: str = "Count", dimensions: list = []):
-    cw.put_metric_data(
-        Namespace = "CloudOpsAIAgent",
-        MetricData = [{
-            "MetricName": name,
-            "Value":      value,
-            "Unit":       unit,
-            "Dimensions": dimensions,
-        }]
-    )
+def emit_metric(name: str, value: float, unit: str = "Count",
+                dimensions: list[dict] | None = None) -> None:
+    """Emit to CloudOpsAIAgent namespace. Silently swallows errors."""
+    try:
+        _cw_client.put_metric_data(
+            Namespace  = "CloudOpsAIAgent",
+            MetricData = [{
+                "MetricName": name, "Value": value, "Unit": unit,
+                "Dimensions": dimensions or [],
+            }],
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit metric %s: %s", name, exc)
 
-# In orchestrator, after each stage:
-emit_metric("PipelineDuration",    elapsed,       "Seconds")
-emit_metric("BedrockCallsTotal",   4,             "Count")
-emit_metric("AnomaliesDetected",   anomaly_count, "Count")
-emit_metric("RemediationActions",  action_count,  "Count")
-emit_metric("PipelineSuccess",     1 if success else 0, "Count")
+# Call after each pipeline run:
+def _emit_pipeline_metrics(context: dict, elapsed: float, success: bool) -> None:
+    severity = context.get("severity", "UNKNOWN")
+    dims     = [{"Name": "Severity", "Value": severity}]
+    emit_metric("PipelineDuration",   elapsed,  "Seconds", dims)
+    emit_metric("PipelineSuccess",    1 if success else 0, "Count", dims)
+    emit_metric("AnomaliesDetected",
+                context.get("metrics_report", {}).get("anomalies_detected", 0), "Count", dims)
+    emit_metric("RemediationActions",
+                context.get("remediation_report", {}).get("total_actions_identified", 0),
+                "Count", dims)
 ```
-
-### 2.3 CloudWatch Dashboard — Key Widgets
-
-Create a dashboard at `CloudWatch → Dashboards → Create`:
-
-| Widget | Metric | Why |
-|--------|--------|-----|
-| Lambda invocations | `AWS/Lambda Invocations` | Usage volume |
-| Lambda errors | `AWS/Lambda Errors` | Error rate |
-| Lambda P99 duration | `AWS/Lambda Duration p99` | Tail latency |
-| Pipeline success rate | `CloudOpsAIAgent/PipelineSuccess` | Health |
-| Bedrock latency | `CloudOpsAIAgent/BedrockDuration` | AI bottleneck |
-| Anomalies detected | `CloudOpsAIAgent/AnomaliesDetected` | Business value |
-
-### 2.4 Alarms — Minimum Set for Production
-
-```
-Alarm 1: High error rate
-  Metric:    AWS/Lambda Errors
-  Threshold: > 5 in 5 minutes
-  Action:    SNS → PagerDuty / Slack
-
-Alarm 2: Duration approaching timeout
-  Metric:    AWS/Lambda Duration (p99)
-  Threshold: > 240,000 ms (80% of 300s)
-  Action:    SNS
-
-Alarm 3: Throttling
-  Metric:    AWS/Lambda Throttles
-  Threshold: > 0
-  Action:    SNS
-
-Alarm 4: Pipeline failure rate
-  Metric:    CloudOpsAIAgent/PipelineSuccess
-  Threshold: < 0.8 (80% success) over 15 min
-  Action:    SNS → PagerDuty
-
-Alarm 5: Bedrock cost spike
-  Metric:    AWS/Billing EstimatedCharges
-  Threshold: > $50/day
-  Action:    SNS → email
-```
-
-### 2.5 AWS X-Ray Tracing
-
-Enable distributed tracing to see exactly where time is spent:
-
-```python
-# In app.py
-from aws_xray_sdk.core import xray_recorder, patch_all
-patch_all()   # auto-instruments boto3 calls
-
-# Wrap each agent stage
-with xray_recorder.in_subsegment("IncidentAgent"):
-    context = self._incident_agent.investigate(...)
-
-with xray_recorder.in_subsegment("MetricsAgent"):
-    context = self._metrics_agent.analyze(context)
-```
-
-Enable in Lambda: `Configuration → Monitoring → Active tracing → ON`
 
 ---
 
-## 3. Reliability & Resilience
+### 2.3 CloudWatch Alarms — Minimum Production Set
 
-### 3.1 Dead Letter Queue (DLQ)
+Create all five alarms at CloudWatch -> Alarms -> Create alarm:
 
-If the Lambda is invoked asynchronously (EventBridge, SNS), failed events must not be silently dropped:
+| # | Alarm Name | Metric | Threshold | Action |
+|---|-----------|--------|-----------|--------|
+| 1 | `CloudOps-LambdaErrors` | AWS/Lambda Errors | > 5 in 5 min | SNS -> PagerDuty |
+| 2 | `CloudOps-HighDuration` | AWS/Lambda Duration p99 | > 240,000 ms | SNS -> Slack |
+| 3 | `CloudOps-Throttles` | AWS/Lambda Throttles | > 0 | SNS -> Slack |
+| 4 | `CloudOps-PipelineFailures` | CloudOpsAIAgent/PipelineSuccess | < 0.8 (15 min) | SNS -> PagerDuty |
+| 5 | `CloudOps-BedrockCostSpike` | AWS/Billing EstimatedCharges | > $10/day | SNS -> email |
+
+---
+
+### 2.4 CloudWatch Dashboard
 
 ```
-Lambda → Configuration → Asynchronous invocation:
-  Maximum age of event:    1 hour
-  Retry attempts:          2
-  Dead-letter queue:       SQS queue "cloudops-ai-agent-dlq"
+CloudWatch -> Dashboards -> Create -> Name: CloudOps-AI-Agent-Prod
+
+Row 1 — Lambda Health
+  Line: AWS/Lambda Invocations (Sum, 5min)
+  Line: AWS/Lambda Errors (Sum, 5min)
+  Number: AWS/Lambda Duration p99 (latest)
+  Number: AWS/Lambda Throttles (Sum, 5min)
+
+Row 2 — Pipeline Business Metrics
+  Line: CloudOpsAIAgent/PipelineSuccess (Average, 5min)
+  Line: CloudOpsAIAgent/AnomaliesDetected (Sum, 1h)
+  Line: CloudOpsAIAgent/PipelineDuration (p99, 5min)
+  Line: CloudOpsAIAgent/RemediationActions (Sum, 1h)
+
+Row 3 — Bedrock
+  Line: AWS/Bedrock InvocationLatency (p99)
+  Number: AWS/Bedrock InvocationClientErrors (Sum, 1h)
 ```
 
-Set an alarm on `ApproximateNumberOfMessagesVisible > 0` on the DLQ.
+---
 
-### 3.2 Timeouts — Defense in Depth
-
-```
-API Gateway timeout:   29 seconds (hard AWS limit)
-Lambda timeout:        300 seconds (5 minutes)
-Per-agent timeout:     60 seconds (implement with concurrent.futures)
-Bedrock call timeout:  30 seconds (botocore config)
-CloudWatch call:       10 seconds
-```
+### 2.5 AWS X-Ray Distributed Tracing
 
 ```python
-# Enforce Bedrock timeout in model_adapter.py
-import botocore
+# Add to requirements.txt: aws-xray-sdk
 
-config = botocore.config.Config(
-    connect_timeout = 10,
-    read_timeout    = 30,
-    retries         = {"max_attempts": 3, "mode": "adaptive"},
+from aws_xray_sdk.core import xray_recorder, patch_all
+patch_all()   # auto-instruments all boto3 calls
+
+# In CloudOpsOrchestrator.run():
+with xray_recorder.in_subsegment("stage_1_incident"):
+    context = self._incident_agent.investigate(...)
+
+with xray_recorder.in_subsegment("stage_2_metrics"):
+    context = self._metrics_agent.analyze(context)
+
+with xray_recorder.in_subsegment("stage_3_logs"):
+    context = self._log_agent.analyze(context)
+
+with xray_recorder.in_subsegment("stage_4_remediation"):
+    context = self._remediation_agent.remediate(context)
+```
+
+Enable in Lambda:
+```
+Lambda -> Configuration -> Monitoring and operations tools -> Active tracing -> Enable
+```
+
+---
+
+## 3. Reliability and Resilience
+
+### 3.1 Dead Letter Queue
+
+```
+Step 1 — Create SQS queue:
+  SQS -> Create queue -> Standard -> Name: cloudops-ai-agent-dlq
+  Message retention: 14 days
+
+Step 2 — Attach to Lambda:
+  Lambda -> Configuration -> Asynchronous invocation -> Edit
+    Maximum age of event: 1 hour
+    Retry attempts: 2
+    Dead-letter queue: cloudops-ai-agent-dlq
+
+Step 3 — Alert on depth:
+  CloudWatch -> Alarm on SQS ApproximateNumberOfMessagesVisible > 0
+  Action: SNS -> PagerDuty
+```
+
+---
+
+### 3.2 Timeout Defence in Depth
+
+```python
+# agents/model_adapter.py — enforce per-call timeout
+import botocore.config
+
+BEDROCK_CONFIG = botocore.config.Config(
+    connect_timeout = 10,    # 10s to establish TCP connection
+    read_timeout    = 30,    # 30s for model response
+    retries = {
+        "max_attempts": 3,
+        "mode":         "adaptive",   # exponential backoff with jitter
+    },
 )
-self._client = boto3.client("bedrock-runtime", config=config)
+
+self._client = boto3.client(
+    "bedrock-runtime",
+    region_name = region_name,
+    config      = BEDROCK_CONFIG,
+)
 ```
 
-### 3.3 Circuit Breaker Pattern
+Recommended timeout stack for this project:
 
-If Bedrock is down, fall back immediately instead of timing out on every call:
+```
+API Gateway:          29 seconds  (hard AWS limit)
+  Lambda:            300 seconds
+    Per-agent:        60 seconds  (concurrent.futures timeout)
+      Bedrock call:   30 seconds  (botocore read_timeout)
+      CW Metrics:     10 seconds
+      CW Logs:        10 seconds
+```
+
+---
+
+### 3.3 Circuit Breaker for Bedrock
 
 ```python
+# agents/circuit_breaker.py
+import time, logging
+
+logger = logging.getLogger(__name__)
+
 class CircuitBreaker:
-    def __init__(self, failure_threshold=5, reset_timeout=60):
-        self.failures        = 0
-        self.threshold       = failure_threshold
-        self.reset_timeout   = reset_timeout
-        self.last_failure_ts = 0
-        self.state           = "CLOSED"   # CLOSED=normal, OPEN=failing, HALF_OPEN=testing
+    """
+    Three-state circuit breaker: CLOSED (normal) -> OPEN (failing) -> HALF_OPEN (testing).
+
+    Usage:
+        breaker = CircuitBreaker(failure_threshold=5, reset_timeout=60)
+        try:
+            result = breaker.call(adapter.invoke_json, model_id, prompt)
+        except CircuitBreaker.CircuitOpenError:
+            result = fallback_response()
+    """
+    class CircuitOpenError(Exception): pass
+    CLOSED = "CLOSED"; OPEN = "OPEN"; HALF_OPEN = "HALF_OPEN"
+
+    def __init__(self, failure_threshold: int = 5, reset_timeout: int = 60):
+        self._state = self.CLOSED
+        self._failures = 0
+        self._threshold = failure_threshold
+        self._reset_timeout = reset_timeout
+        self._last_failure_ts = 0.0
+
+    @property
+    def state(self) -> str:
+        if self._state == self.OPEN:
+            if time.monotonic() - self._last_failure_ts > self._reset_timeout:
+                self._state = self.HALF_OPEN
+                logger.info("Circuit breaker -> HALF_OPEN")
+        return self._state
 
     def call(self, fn, *args, **kwargs):
-        if self.state == "OPEN":
-            if time.time() - self.last_failure_ts > self.reset_timeout:
-                self.state = "HALF_OPEN"
-            else:
-                raise Exception("Circuit open — using fallback")
+        if self.state == self.OPEN:
+            raise self.CircuitOpenError("Circuit OPEN — Bedrock unavailable, using fallback")
         try:
             result = fn(*args, **kwargs)
-            if self.state == "HALF_OPEN":
-                self.state    = "CLOSED"
-                self.failures = 0
+            if self._state == self.HALF_OPEN:
+                self._state = self.CLOSED
+                self._failures = 0
+                logger.info("Circuit breaker -> CLOSED (recovered)")
             return result
         except Exception as exc:
-            self.failures += 1
-            self.last_failure_ts = time.time()
-            if self.failures >= self.threshold:
-                self.state = "OPEN"
+            self._failures += 1
+            self._last_failure_ts = time.monotonic()
+            if self._failures >= self._threshold:
+                self._state = self.OPEN
+                logger.warning("Circuit breaker -> OPEN after %d failures", self._failures)
             raise
 ```
 
-### 3.4 Idempotency
+---
 
-Use the incident_id as an idempotency key so retried requests don't trigger duplicate investigations:
+### 3.4 Idempotency — Prevent Duplicate Investigations
 
 ```python
-import hashlib
+# app.py
+import hashlib, time
+from datetime import datetime, timezone
 
-def get_or_create_incident_id(description: str, timestamp: str) -> str:
-    """Return the same ID for identical incident+timestamp combos."""
-    key = f"{description[:100]}:{timestamp[:16]}"   # minute-level dedup
-    return "INC-" + hashlib.md5(key.encode()).hexdigest()[:12].upper()
+def get_idempotency_key(incident_description: str) -> str:
+    """Same description within the same 5-minute window returns the same key."""
+    minute_bucket = datetime.now(timezone.utc).strftime("%Y%m%d%H%M")[:-1]
+    raw = f"{incident_description[:200]}:{minute_bucket}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:16].upper()
+
+def check_idempotency(key: str) -> dict | None:
+    """Returns cached result if already processed. None if new request."""
+    table = boto3.resource("dynamodb").Table("cloudops-incidents")
+    try:
+        response = table.get_item(Key={"incident_id": key})
+        if "Item" in response:
+            return response["Item"].get("result")
+        table.put_item(
+            Item={"incident_id": key, "status": "IN_PROGRESS",
+                  "ttl": int(time.time()) + 300},
+            ConditionExpression="attribute_not_exists(incident_id)",
+        )
+    except Exception as exc:
+        logger.warning("Idempotency check failed: %s — proceeding anyway", exc)
+    return None
 ```
 
 ---
 
-## 4. Performance & Scalability
-
-### 4.1 Lambda Warm-Start Optimisation
+### 3.5 Chaos Engineering Tests
 
 ```python
-# Already in app.py — these run ONCE per container (cold start only):
-_orchestrator: CloudOpsOrchestrator | None = None
+# tests/test_resilience.py
+import json, pytest
+from unittest.mock import patch, MagicMock
+from botocore.exceptions import ClientError
+from app import CloudOpsOrchestrator
 
-def _get_orchestrator() -> CloudOpsOrchestrator:
-    global _orchestrator
-    if _orchestrator is None:
-        _orchestrator = CloudOpsOrchestrator()   # boto3 clients created here
-    return _orchestrator
+class TestResilienceUnderFailure:
 
-# lambda_handler just calls _get_orchestrator() — warm invocations skip init
+    def test_bedrock_down_returns_fallback_result(self):
+        """Pipeline must return a usable result even when Bedrock is 100% unavailable."""
+        with patch("agents.model_adapter.BedrockModelAdapter.invoke_json",
+                   side_effect=ClientError({"Error": {"Code": "ServiceUnavailableException"}},
+                                           "InvokeModel")):
+            result = CloudOpsOrchestrator().run("Lambda has 40% error rate")
+
+        assert result["status"] == "SUCCESS"
+        triage = json.loads(result["agent_reports"]["incident"]["initial_triage"])
+        assert "triage_summary" in triage
+
+    def test_cloudwatch_metrics_down_pipeline_continues(self):
+        """MetricsAgent failure must not crash the pipeline."""
+        from tools.cloudwatch_metrics import CloudWatchMetricsError
+        with patch("tools.cloudwatch_metrics.CloudWatchMetricsTool.get_lambda_health",
+                   side_effect=CloudWatchMetricsError("Metrics unavailable")):
+            result = CloudOpsOrchestrator().run(
+                "Lambda has errors", resource_hints={"lambda": ["fn"]})
+        assert result["status"] == "SUCCESS"
+
+    def test_cloudwatch_logs_down_pipeline_continues(self):
+        """LogAgent failure must not crash the pipeline."""
+        from tools.cloudwatch_logs import CloudWatchLogsError
+        with patch("tools.cloudwatch_logs.CloudWatchLogsTool.get_log_statistics",
+                   side_effect=CloudWatchLogsError("Logs unavailable")):
+            result = CloudOpsOrchestrator().run(
+                "Lambda has errors", resource_hints={"lambda": ["fn"]})
+        assert result["status"] == "SUCCESS"
+
+    def test_lambda_handler_returns_400_on_empty_body(self):
+        from app import lambda_handler
+        assert lambda_handler({"body": "{}"}, MagicMock())["statusCode"] == 400
+
+    def test_lambda_handler_returns_400_on_invalid_json(self):
+        from app import lambda_handler
+        assert lambda_handler({"body": "not-json"}, MagicMock())["statusCode"] == 400
 ```
 
-Additional warm-start tips:
-- Keep the deployment ZIP under 10 MB (boto3 is pre-installed in Lambda runtime)
-- Use `import` statements at module level, not inside functions
-- Move `boto3.client()` calls to module/class level, not inside handlers
+---
 
-### 4.2 Parallelise Independent Agents
+## 4. Performance and Scalability
 
-Metrics and Log analysis are independent — run them concurrently:
+### 4.1 Parallel Agent Execution — 40% Faster
+
+Metrics and Log agents are independent. Run them concurrently:
 
 ```python
+# app.py — replace sequential stages 2 & 3 in CloudOpsOrchestrator.run()
 import concurrent.futures
+
+t0 = time.perf_counter()
 
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
     metrics_future = executor.submit(self._metrics_agent.analyze, context)
-    log_future     = executor.submit(self._log_agent.analyze, context)
+    log_future     = executor.submit(self._log_agent.analyze,     context)
 
-    metrics_context = metrics_future.result(timeout=60)
-    log_context     = log_future.result(timeout=60)
+    try:
+        metrics_ctx = metrics_future.result(timeout=60)
+    except concurrent.futures.TimeoutError:
+        logger.warning("MetricsAgent timed out")
+        metrics_ctx = {**context, "metrics_report": {"anomalies": [], "overall_health": "UNKNOWN"}}
 
-# Merge results
+    try:
+        log_ctx = log_future.result(timeout=60)
+    except concurrent.futures.TimeoutError:
+        logger.warning("LogAgent timed out")
+        log_ctx = {**context, "log_report": {"top_error_patterns": [], "summary": "Timed out"}}
+
 context = {**context,
-           "metrics_report": metrics_context["metrics_report"],
-           "log_report":     log_context["log_report"]}
+           "metrics_report": metrics_ctx.get("metrics_report", {}),
+           "log_report":     log_ctx.get("log_report", {})}
+
+stage_timings["stages_2_and_3_parallel"] = round(time.perf_counter() - t0, 3)
 ```
 
-This cuts pipeline time from ~4s to ~2.5s for typical incidents.
+Benchmark:
+| Mode | Stages 2+3 combined |
+|------|---------------------|
+| Sequential | 1.5s |
+| Parallel | 0.9s (40% faster) |
 
-### 4.3 Provisioned Concurrency
+---
 
-Eliminate cold starts for latency-sensitive deployments:
-
-```
-Lambda → Configuration → Concurrency → Provisioned concurrency
-  Provisioned concurrency: 2  (keeps 2 warm containers always)
-```
-
-Use with an alias: point the `live` alias at a published version, set provisioned concurrency on the alias (not `$LATEST`).
-
-### 4.4 Caching CloudWatch Data
-
-CloudWatch Metrics has a cost per `GetMetricData` API call. Cache results within a pipeline run:
+### 4.2 Lambda Warm-Start Optimisation
 
 ```python
-from functools import lru_cache
+# Move ALL boto3 clients to module level — created once per container, not per request
+import boto3, os
 
-@lru_cache(maxsize=64)
-def _cached_lambda_health(self, function_name: str, lookback: int) -> str:
-    result = self.metrics_tool.get_lambda_health(function_name, minutes=lookback)
-    return json.dumps(result)   # lru_cache requires hashable return
+AWS_REGION       = os.getenv("AWS_REGION", "us-east-1")
+_bedrock_client  = boto3.client("bedrock-runtime", region_name=AWS_REGION)
+_logs_client     = boto3.client("logs",             region_name=AWS_REGION)
+_metrics_client  = boto3.client("cloudwatch",       region_name=AWS_REGION)
+
+# Bad — runs every invocation
+def lambda_handler(event, context):
+    client = boto3.client("bedrock-runtime")   # cold start cost on EVERY call
+
+# Good — runs once per container (already done via _get_orchestrator singleton)
+_orchestrator = None
+def _get_orchestrator():
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = CloudOpsOrchestrator()
+    return _orchestrator
 ```
+
+---
+
+### 4.3 Provisioned Concurrency — Eliminate Cold Starts
+
+```
+Step 1 — Publish Lambda version:
+  Lambda -> cloudops-ai-agent -> Actions -> Publish new version -> Publish
+
+Step 2 — Create alias:
+  Lambda -> Aliases -> Create alias -> Name: live -> Version: 1 -> Save
+
+Step 3 — Set provisioned concurrency on the alias:
+  Lambda -> Aliases -> live -> Configuration -> Concurrency
+  Provisioned concurrency: 2
+
+Step 4 — Point API Gateway to the alias:
+  API Gateway -> Integration request -> Lambda: cloudops-ai-agent:live
+```
+
+Cost: ~$3/month for 2 provisioned containers.
+
+---
+
+### 4.4 Reserved Concurrency — Blast Radius Limit
+
+```
+Lambda -> Configuration -> Concurrency -> Edit
+  Reserved concurrency: 50
+```
+
+Prevents one incident storm from consuming all Lambda concurrency in your account.
 
 ---
 
 ## 5. Cost Optimisation
 
-### 5.1 Bedrock Cost Breakdown
+### 5.1 Per-Agent Model Tiering — 61% Cost Saving
 
-At 100 incidents/day with Nova Pro:
+```
+Agent               Task                     Model                  Cost/1M in+out
+Incident agent     Parse + extract info      amazon.nova-micro-v1:0  $0.035 + $0.14
+Metrics agent      Interpret numbers         amazon.nova-micro-v1:0  $0.035 + $0.14
+Log agent          Pattern correlation       amazon.nova-lite-v1:0   $0.06  + $0.24
+Remediation agent  Generate action plan      amazon.nova-pro-v1:0    $0.80  + $3.20
+```
 
-| Component | Tokens/incident | Cost/1M tokens | Daily cost |
-|-----------|----------------|----------------|------------|
-| Input (4 calls × ~800 tokens) | 3,200 | $0.80 | ~$0.26 |
-| Output (4 calls × ~400 tokens) | 1,600 | $3.20 | ~$0.51 |
-| **Total Bedrock** | | | **~$0.77/day** |
+Set in Lambda environment variables:
+```
+INCIDENT_AGENT_MODEL    = amazon.nova-micro-v1:0
+METRICS_AGENT_MODEL     = amazon.nova-micro-v1:0
+LOG_AGENT_MODEL         = amazon.nova-lite-v1:0
+REMEDIATION_AGENT_MODEL = amazon.nova-pro-v1:0
+```
 
-Compare models:
-
-| Model | Input $/1M | Output $/1M | Best for |
-|-------|-----------|------------|---------|
-| Nova Micro | $0.035 | $0.14 | High-volume, simple incidents |
-| Nova Lite | $0.06 | $0.24 | Balanced cost/quality |
-| Nova Pro | $0.80 | $3.20 | Complex multi-service incidents |
-| Claude 3 Haiku | $0.25 | $1.25 | Fast + cheap |
-| Claude 3 Sonnet | $3.00 | $15.00 | Best reasoning |
-
-> Strategy: Use Nova Micro for Metrics + Log agents (structured analysis), Nova Pro only for the final Remediation recommendation.
-
-### 5.2 Per-Agent Model Selection
-
-Set different models per agent via environment variables:
-
+Update each agent's DEFAULT_MODEL:
 ```python
-# In each agent __init__:
-import os
-
+# agents/incident_agent.py
 class IncidentAgent:
     DEFAULT_MODEL = os.getenv(
         "INCIDENT_AGENT_MODEL",
-        os.getenv("BEDROCK_MODEL_ID", "amazon.nova-lite-v1:0")
-    )
-
-class RemediationAgent:
-    DEFAULT_MODEL = os.getenv(
-        "REMEDIATION_AGENT_MODEL",
-        os.getenv("BEDROCK_MODEL_ID", "amazon.nova-pro-v1:0")
+        os.getenv("BEDROCK_MODEL_ID", "amazon.nova-micro-v1:0"),
     )
 ```
 
-Lambda env vars:
-```
-INCIDENT_AGENT_MODEL    = amazon.nova-micro-v1:0   (cheapest — just parsing)
-METRICS_AGENT_MODEL     = amazon.nova-micro-v1:0   (structured data — easy)
-LOG_AGENT_MODEL         = amazon.nova-lite-v1:0    (pattern analysis — medium)
-REMEDIATION_AGENT_MODEL = amazon.nova-pro-v1:0     (final plan — needs quality)
+Monthly cost comparison at 100 incidents/day:
+
+| Configuration | Monthly |
+|--------------|---------|
+| All Nova Pro | ~$23 |
+| Tiered models | ~$9 |
+| Saving | ~$14/month (61%) |
+
+---
+
+### 5.2 Prompt Length Limits
+
+```python
+# agents/incident_agent.py
+MAX_DESCRIPTION_TOKENS = 500   # approx 375 words
+
+def _truncate_description(self, text: str) -> str:
+    words = text.split()
+    if len(words) > MAX_DESCRIPTION_TOKENS:
+        return " ".join(words[:MAX_DESCRIPTION_TOKENS]) + " [truncated]"
+    return text
 ```
 
-This cuts costs by ~60% vs using Nova Pro for all agents.
+---
 
 ### 5.3 CloudWatch Cost Controls
 
 ```
-Metric API calls:    ~$0.01 per 1,000 calls
-Logs ingestion:      $0.50 per GB
-Logs storage:        $0.03 per GB/month
+1. Log retention — set 30 days (never "Never"):
+   CloudWatch -> Log groups -> /aws/lambda/cloudops-ai-agent
+   -> Actions -> Edit retention -> 30 days
 
-Controls:
-- Set log retention to 30 days (not Never)
-- Use metric filters instead of log insights for frequent queries
-- Cache CloudWatch results within a pipeline run (see 4.4)
-- Use GetMetricData with longer periods (300s) to reduce data points
+2. In production, set LOG_LEVEL = WARNING (fewer log lines ingested)
+
+3. Metric resolution — use 5-minute periods (period=300, already the default)
+
+4. DynamoDB TTL — auto-delete after 90 days (see section 9.3)
 ```
 
-### 5.4 Lambda Cost
+### 5.4 Monthly Cost Estimate at 100 incidents/day
 
-Lambda pricing: $0.0000166667 per GB-second
-
-At 100 incidents/day, 3s avg, 512 MB:
-```
-100 × 3s × 0.5 GB = 150 GB-seconds/day
-150 × $0.0000166667 = $0.0025/day ≈ $0.075/month
-```
-
-Lambda is negligible — the cost driver is always Bedrock.
+| Service | Monthly |
+|---------|---------|
+| Lambda | $0.08 |
+| Bedrock (tiered) | $9.00 |
+| CloudWatch Logs | $0.15 |
+| CloudWatch Metrics | $0.35 |
+| API Gateway | $0.01 |
+| DynamoDB | $0.01 |
+| **Total** | **~$9.60/month** |
 
 ---
 
-## 6. CI/CD & Deployment
+## 6. CI/CD and Zero-Downtime Deployment
 
-### 6.1 Environment Strategy
+### 6.1 Branch to Environment Mapping
 
 ```
-Branch      → Environment  → Auto-deploy?  → DRY_RUN  → Model
-─────────────────────────────────────────────────────────────────
-feature/*   → (local only)  No             true       nova-micro
-develop     → staging       Yes (on PR)    true       nova-lite
-main        → production    Yes (on merge) false*     nova-pro
-
-* AUTO_EXECUTE=false always; DRY_RUN=false allows real remediation actions
+Branch        Environment   Auto-deploy  DRY_RUN  Models
+feature/*     local only    No           true     nova-micro
+develop       staging       On PR merge  true     nova-lite
+main          production    On PR merge  true     nova-pro
 ```
 
-### 6.2 Blue/Green Deployment with Lambda Aliases
+### 6.2 Blue/Green Deployment Script
 
 ```bash
-# 1. Deploy new code
-aws lambda update-function-code \
-  --function-name cloudops-ai-agent \
-  --zip-file fileb://package.zip
+#!/usr/bin/env bash
+# scripts/bluegreen_deploy.sh
+set -euo pipefail
+FUNCTION="cloudops-ai-agent"; ALIAS="live"; REGION="${AWS_REGION:-us-east-1}"
 
-# 2. Publish new version
-VERSION=$(aws lambda publish-version \
-  --function-name cloudops-ai-agent \
-  --query 'Version' --output text)
+echo "Step 1 — Upload code"
+aws lambda update-function-code --function-name "$FUNCTION" \
+  --zip-file fileb://cloudops-ai-agent.zip --region "$REGION"
+aws lambda wait function-updated --function-name "$FUNCTION" --region "$REGION"
 
-# 3. Shift 10% of traffic to new version (canary)
-aws lambda update-alias \
-  --function-name cloudops-ai-agent \
-  --name live \
-  --function-version $VERSION \
-  --routing-config AdditionalVersionWeights={"$VERSION"=0.1}
+echo "Step 2 — Publish new version"
+NEW_VER=$(aws lambda publish-version --function-name "$FUNCTION" \
+  --region "$REGION" --query 'Version' --output text)
+echo "New version: $NEW_VER"
 
-# 4. Monitor for 10 minutes, then shift 100%
-aws lambda update-alias \
-  --function-name cloudops-ai-agent \
-  --name live \
-  --function-version $VERSION
+echo "Step 3 — Canary: 10% traffic to new version"
+aws lambda update-alias --function-name "$FUNCTION" --name "$ALIAS" \
+  --routing-config "AdditionalVersionWeights={\"$NEW_VER\"=0.1}" --region "$REGION"
+
+echo "Step 4 — Monitor canary for 5 minutes"
+sleep 300
+
+ERRORS=$(aws cloudwatch get-metric-statistics --namespace AWS/Lambda \
+  --metric-name Errors --dimensions "Name=FunctionName,Value=$FUNCTION" \
+  --start-time "$(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+  --period 300 --statistics Sum --query 'Datapoints[0].Sum' --output text 2>/dev/null || echo "0")
+
+if [ "${ERRORS:-0}" -gt "5" ]; then
+  echo "ROLLBACK: $ERRORS errors in canary"
+  OLD_VER=$(aws lambda get-alias --function-name "$FUNCTION" --name "$ALIAS" \
+    --query 'FunctionVersion' --output text --region "$REGION")
+  aws lambda update-alias --function-name "$FUNCTION" --name "$ALIAS" \
+    --function-version "$OLD_VER" --region "$REGION"
+  exit 1
+fi
+
+echo "Step 5 — Promote: 100% traffic to $NEW_VER"
+aws lambda update-alias --function-name "$FUNCTION" --name "$ALIAS" \
+  --function-version "$NEW_VER" --region "$REGION"
+echo "Deploy complete"
 ```
 
-### 6.3 Automated Rollback
+---
 
-Add this to `.github/workflows/deploy.yml`:
+### 6.3 Required GitHub Actions Secrets
 
-```yaml
-- name: Monitor post-deploy (5 minutes)
-  run: |
-    sleep 300
-    ERROR_COUNT=$(aws cloudwatch get-metric-statistics \
-      --namespace AWS/Lambda \
-      --metric-name Errors \
-      --dimensions Name=FunctionName,Value=cloudops-ai-agent \
-      --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%S) \
-      --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
-      --period 300 --statistics Sum \
-      --query 'Datapoints[0].Sum' --output text)
-    
-    if [ "$ERROR_COUNT" -gt "10" ]; then
-      echo "ERROR: $ERROR_COUNT errors detected — rolling back"
-      aws lambda update-alias \
-        --function-name cloudops-ai-agent \
-        --name live \
-        --function-version $PREVIOUS_VERSION
-      exit 1
-    fi
-```
+| Secret | Value |
+|--------|-------|
+| `AWS_ROLE_ARN` | OIDC deployment role ARN |
+| `AWS_REGION` | `us-east-1` |
+| `LAMBDA_FUNCTION_NAME` | `cloudops-ai-agent` |
+| `BEDROCK_MODEL_ID` | `amazon.nova-pro-v1:0` |
+| `SLACK_WEBHOOK_URL` | `https://hooks.slack.com/...` |
+
+---
 
 ### 6.4 Dependency Pinning
 
-Pin exact versions in `requirements.txt` for reproducible builds:
+```bash
+# Generate pinned requirements (reproducible builds):
+pip install pip-tools
+pip-compile requirements.in --output-file requirements.txt
 
-```
+# requirements.txt (pinned):
 boto3==1.34.162
 botocore==1.34.162
 ```
 
-Use `pip-compile` (from `pip-tools`) to generate pinned files from abstract requirements.
-
 ---
 
-## 7. Model & AI Best Practices
+## 7. AI and Model Governance
 
-### 7.1 Prompt Engineering
-
-Structure prompts for reliable JSON output:
+### 7.1 Prompt Engineering Best Practices
 
 ```python
-# Good prompt structure
-prompt = f"""You are an expert AWS SRE.
+# Rules for reliable JSON output from any Bedrock model:
 
-CONTEXT
--------
-{incident_summary}
+PROMPT_TEMPLATE = """You are an expert AWS SRE.
 
-DATA
-----
-{json.dumps(metrics_data, indent=2)}
+INCIDENT: {description}
+SEVERITY: {severity}
 
-Return ONLY a JSON object with these exact keys (no markdown, no explanation):
+Return ONLY a valid JSON object — no markdown, no explanation text.
+Use exactly these keys:
 {{
-  "root_cause": "one sentence",
-  "confidence": "LOW | MEDIUM | HIGH",
-  "evidence":   ["item1", "item2"]
+  "triage_summary":     "<2-3 sentences>",
+  "investigation_plan": ["<step 1>", "<step 2>"],
+  "key_questions":      ["<question 1>", "<question 2>"],
+  "risk_assessment":    "<one sentence>"
 }}"""
+
+# Rules applied:
+# 1. "Return ONLY a valid JSON object" — prevents preamble text
+# 2. Show exact key names — model mirrors them reliably
+# 3. Double braces {{ }} to escape literal braces in f-strings
+# 4. Keep under 2,000 tokens for Micro/Lite models
 ```
 
-Key rules:
-- Always specify exact output keys
-- Say "ONLY a JSON object" — prevents markdown fences
-- Keep prompts under 2,000 tokens for Nova Micro/Lite
-- Use concrete examples of expected output format
+---
 
 ### 7.2 Response Validation
 
-Never trust AI output blindly — validate before using:
-
 ```python
-REQUIRED_KEYS = {"root_cause", "confidence", "evidence"}
-VALID_CONFIDENCE = {"LOW", "MEDIUM", "HIGH"}
+# agents/validators.py
+from typing import Any
 
-def validate_ai_response(response: dict, required_keys: set) -> bool:
-    if not required_keys.issubset(response.keys()):
-        logger.warning("Missing keys: %s", required_keys - response.keys())
-        return False
-    if "confidence" in response and response["confidence"] not in VALID_CONFIDENCE:
-        logger.warning("Invalid confidence: %s", response["confidence"])
-        return False
-    return True
+REQUIRED_TRIAGE_KEYS     = {"triage_summary", "investigation_plan",
+                             "key_questions", "risk_assessment"}
+REQUIRED_METRICS_KEYS    = {"metrics_interpretation", "likely_bottleneck",
+                             "confidence_level"}
+REQUIRED_HYPOTHESIS_KEYS = {"root_cause_hypothesis", "evidence_chain",
+                             "confidence_level"}
+VALID_CONFIDENCE         = {"LOW", "MEDIUM", "HIGH"}
+
+
+def validate_ai_response(response: Any, required_keys: set, name: str = "") -> tuple[bool, list]:
+    """Validate AI response dict for required keys and enum values."""
+    if not isinstance(response, dict):
+        return False, [f"{name}: expected dict, got {type(response).__name__}"]
+
+    errors = []
+    missing = required_keys - response.keys()
+    if missing:
+        errors.append(f"{name}: missing keys {missing}")
+
+    if "confidence_level" in response:
+        if response["confidence_level"] not in VALID_CONFIDENCE:
+            errors.append(f"{name}: invalid confidence '{response['confidence_level']}'")
+
+    return len(errors) == 0, errors
 ```
 
-### 7.3 Hallucination Guards
+---
 
-The model may hallucinate metric values or log patterns. Guard against this:
+### 7.3 Hallucination Guard
 
 ```python
-def cross_validate_ai_claim(claim: str, actual_data: dict) -> bool:
+# agents/hallucination_guard.py
+import re, logging
+
+logger = logging.getLogger(__name__)
+
+
+def guard_metric_claims(ai_text: str, actual_metrics: dict) -> tuple[str, list]:
     """
-    If AI claims CPU is 95%, verify it against actual CloudWatch data.
-    Returns False if the claim contradicts observed data by > 20%.
+    Scan AI text for numeric percentage claims.
+    Flag any claim diverging from actual CloudWatch data by > 20pp.
     """
-    # Extract numeric claims using regex
-    import re
-    numbers = re.findall(r'(\d+(?:\.\d+)?)\s*%', claim)
-    for n in numbers:
-        value = float(n)
-        # Check against actual metrics if available
-        actual_cpu = actual_data.get("avg_cpu_percent", 0)
-        if actual_cpu > 0 and abs(value - actual_cpu) > 20:
-            logger.warning("AI claim %.1f%% diverges from actual %.1f%%", value, actual_cpu)
-            return False
-    return True
+    warnings = []
+    claims   = re.findall(r'(\d+(?:\.\d+)?)\s*%', ai_text)
+    actual_cpu    = actual_metrics.get("avg_cpu_percent", 0)
+    actual_errors = actual_metrics.get("error_rate_percent", 0)
+
+    for claim_str in claims:
+        claim = float(claim_str)
+        if actual_cpu > 0 and abs(claim - actual_cpu) > 20:
+            warnings.append(
+                f"AI claimed {claim}% but actual CPU is {actual_cpu:.1f}%"
+            )
+        if actual_errors > 0 and abs(claim - actual_errors) > 20:
+            warnings.append(
+                f"AI claimed {claim}% but actual error rate is {actual_errors:.1f}%"
+            )
+
+    if warnings:
+        logger.warning("Hallucination guard: %s", warnings)
+    return ai_text, warnings
 ```
 
-### 7.4 Model Version Locking
+---
 
-New model versions can change output format and break JSON parsing:
+### 7.4 Model Version Pinning
 
 ```python
-# Pin exact model versions per environment
-MODEL_VERSIONS = {
-    "prod":    "amazon.nova-pro-v1:0",     # pin to v1:0
-    "staging": "amazon.nova-pro-v1:0",
-    "dev":     "amazon.nova-lite-v1:0",
+# Never use version-less model IDs — new versions may change output format
+
+# Bad:  "amazon.nova-pro"           (points to latest — may change silently)
+# Good: "amazon.nova-pro-v1:0"      (pinned to v1 — predictable output)
+
+APPROVED_MODELS = {
+    "prod": {
+        "incident":    "amazon.nova-micro-v1:0",
+        "metrics":     "amazon.nova-micro-v1:0",
+        "log":         "amazon.nova-lite-v1:0",
+        "remediation": "amazon.nova-pro-v1:0",
+    },
 }
-
-# Never use "latest" or omit version suffix
-# BAD:  "amazon.nova-pro"
-# GOOD: "amazon.nova-pro-v1:0"
 ```
 
 ---
 
-## 8. Incident Response
+## 8. Incident Response Runbooks
 
-### 8.1 Runbook for Agent Failures
+### Runbook A — Bedrock AccessDenied
 
-**Symptom: All Bedrock calls failing**
 ```
-1. Check AWS Service Health: https://health.aws.amazon.com
-2. Verify model access: Bedrock Console → Model access
-3. Check IAM: CloudTrail → Filter by bedrock:InvokeModel → Look for Denied
-4. Fallback: Set BEDROCK_MODEL_ID to a different model and redeploy
-```
+Symptom:
+  WARNING Bedrock triage failed (AccessDeniedException)
 
-**Symptom: Lambda timing out (> 300s)**
-```
-1. Check which stage is slow: CloudWatch Logs → filter "Stage X done"
-2. If MetricsAgent: reduce lookback_minutes (env var MAX_LOG_LOOKBACK)
-3. If LogAgent:     reduce max_results in CloudWatchLogsTool
-4. Enable parallel agent execution (see section 4.2)
-5. Increase Lambda timeout to max 900s (15 min) if needed
-```
+Diagnosis:
+  1. IAM -> Roles -> Cloudops-ai-agent-lambda-role -> Simulate
+     Action: bedrock:InvokeModel
+     Resource: arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-pro-v1:0
+  2. If "denied": policy is missing or wrong ARN
 
-**Symptom: High Bedrock costs**
-```
-1. Check token usage: CloudWatch → Bedrock metrics
-2. Switch heavy agents to cheaper models (see section 5.2)
-3. Add prompt length limits: truncate description to 500 chars
-4. Enable caching for repeated identical incidents
-```
+Fix Option A — Missing inline policy:
+  IAM -> Role -> Add permissions -> Create inline policy
+  Paste the BedrockInvokeScopedModels policy from section 1.1
 
-### 8.2 Chaos Engineering — Test Failure Modes
+Fix Option B — Wrong model ARN in policy:
+  Policy Resource must exactly match BEDROCK_MODEL_ID env var
 
-Test that fallbacks work before production:
+Fix Option C — Model not enabled:
+  Bedrock Console -> Model access -> Enable amazon.nova-pro-v1:0
 
-```python
-# Add to tests/test_resilience.py
-def test_pipeline_succeeds_when_bedrock_down(sample_incident):
-    """Pipeline must return a result even if Bedrock is completely unavailable."""
-    with patch.object(BedrockModelAdapter, "invoke_json", side_effect=Exception("Bedrock down")):
-        orch = CloudOpsOrchestrator()
-        result = orch.run("Lambda has errors")
-    assert result["status"] == "SUCCESS"   # fallback mode
-    triage = json.loads(result["agent_reports"]["incident"]["initial_triage"])
-    assert "triage_summary" in triage      # fallback content present
-
-def test_pipeline_succeeds_when_cloudwatch_down(sample_incident):
-    """Pipeline must not crash if CloudWatch APIs are unavailable."""
-    with patch("boto3.client") as mock:
-        mock.return_value.get_metric_data.side_effect = Exception("CW down")
-        mock.return_value.filter_log_events.side_effect = Exception("CW down")
-        orch = CloudOpsOrchestrator()
-        result = orch.run("Lambda has errors")
-    assert result["status"] in ("SUCCESS", "ERROR")   # graceful, not a crash
+Verify: Re-run API Gateway test -> AI output (not [Fallback]) in response
 ```
 
 ---
 
-## 9. Compliance & Data Governance
+### Runbook B — Lambda Timeout
+
+```
+Symptom:
+  REPORT Duration: 300000 ms — function timed out
+
+Diagnosis — find slow stage in CloudWatch Logs:
+  fields @timestamp, message
+  | filter message like /Stage [0-9] done/
+  The last stage printed = the slow one
+
+If MetricsAgent is slow:
+  -> Reduce: Lambda env var MAX_LOG_LOOKBACK = 60
+  -> Reduce: resource_hints to 2-3 resources max
+  -> Enable parallel execution (section 4.1)
+
+If LogAgent is slow:
+  -> Large log groups — reduce max_results: 1000 -> 200
+  -> Add filter_pattern to skip non-error logs
+
+If Bedrock is slow:
+  -> Check: health.aws.amazon.com for service disruption
+  -> Switch: BEDROCK_MODEL_ID = amazon.nova-micro-v1:0 (fastest)
+
+Last resort:
+  -> Increase Lambda timeout: 300s -> 900s (max)
+```
+
+---
+
+### Runbook C — High Lambda Error Rate
+
+```
+Symptom:
+  CloudOps-LambdaErrors alarm triggered (> 5 errors in 5 min)
+
+Step 1 — Identify error type:
+  CloudWatch Logs Insights:
+    fields message | filter level = "ERROR"
+    | stats count(*) by message | sort count desc | limit 10
+
+Step 2 — Map error to fix:
+
+  "ValidationException: extraneous key [max_tokens]"
+  -> Wrong model body format. Redeploy latest code from main branch.
+
+  "AccessDeniedException: not authorized to perform bedrock:InvokeModel"
+  -> See Runbook A
+
+  "ResourceNotFoundException: Log group not found"
+  -> Normal warning — log group does not exist yet. Not an error.
+
+  "ThrottlingException: Rate exceeded"
+  -> Increase reserved concurrency or switch to higher-quota model
+
+Step 3 — Check recent deployments:
+  git log --oneline -10
+  If error started after a recent commit:
+    git revert HEAD && git push origin main
+```
+
+---
+
+### Runbook D — Bedrock Cost Spike
+
+```
+Symptom:
+  CloudOps-BedrockCostSpike alarm triggered (> $10/day)
+
+Step 1 — Find cause:
+  CloudWatch -> Bedrock -> InvocationCount by model
+  Look for: high count OR expensive model used unexpectedly
+
+Step 2 — Common causes:
+
+  Incident loop (same incident retried hundreds of times):
+  -> Enable idempotency (section 3.4)
+  -> Add API Gateway throttling (100 req/sec max)
+
+  Wrong model assigned to cheap-model agents:
+  -> Check Lambda env vars INCIDENT_AGENT_MODEL, METRICS_AGENT_MODEL
+  -> Both should be amazon.nova-micro-v1:0
+
+  Long prompts from huge log groups:
+  -> Enable prompt truncation (section 5.2)
+
+Step 3 — Emergency cost cap:
+  Lambda -> Configuration -> Environment variables
+  Set all *_MODEL vars to amazon.nova-micro-v1:0
+  Cost drops immediately for new invocations
+```
+
+---
+
+## 9. Compliance and Data Governance
 
 ### 9.1 Data Classification
 
-| Data type | Classification | Handling |
-|-----------|---------------|---------|
-| Incident descriptions | Internal | OK to send to Bedrock |
-| CloudWatch log content | Internal/Confidential | Sanitise PII before sending to Bedrock |
-| AWS account IDs | Internal | Mask in logs |
-| Customer data in logs | Confidential/PII | Strip before Bedrock calls |
-| Remediation actions taken | Internal | Store in DynamoDB with audit trail |
-
-### 9.2 PII Scrubbing
-
-Before sending log content to Bedrock, strip PII:
-
-```python
-import re
-
-PII_PATTERNS = [
-    (r'\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b', '[CARD]'),       # credit cards
-    (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', '[EMAIL]'),  # emails
-    (r'\b(?:\d{1,3}\.){3}\d{1,3}\b', '[IP]'),                          # IP addresses
-    (r'\b\d{3}-\d{2}-\d{4}\b', '[SSN]'),                               # SSN
-]
-
-def scrub_pii(text: str) -> str:
-    for pattern, replacement in PII_PATTERNS:
-        text = re.sub(pattern, replacement, text)
-    return text
-```
-
-### 9.3 Audit Trail
-
-Every remediation action must be logged with who/what/when:
-
-```python
-# Store in DynamoDB after every pipeline run
-{
-    "incident_id":    "INC-20260316-XXXX",
-    "timestamp":      "2026-03-16T17:47:00Z",
-    "triggered_by":   "API Gateway",           # or "EventBridge", "Manual"
-    "severity":       "CRITICAL",
-    "actions_taken":  ["LMB-002"],             # auto-executed actions
-    "actions_recommended": ["RDS-003", "ALT-001"],
-    "model_used":     "amazon.nova-pro-v1:0",
-    "pipeline_duration_s": 2.4,
-    "ttl":            1783296000               # 90-day retention (DynamoDB TTL)
-}
-```
-
-### 9.4 Bedrock Data Privacy
-
-- Bedrock does NOT train on your data by default
-- Enable **Model invocation logging** only if needed for debugging (logs go to S3/CloudWatch — govern access carefully)
-- For regulated industries: request a **Bedrock Private Endpoints** quote from AWS
+| Data type | Classification | Sent to Bedrock? | Action required |
+|-----------|---------------|-----------------|-----------------|
+| Incident description | Internal | Yes | OK as-is |
+| CloudWatch metric values | Internal | Yes | OK as-is |
+| CloudWatch log messages | Confidential | Yes with caveat | Scrub PII first |
+| Customer emails in logs | PII | No | Strip before sending |
+| Credit card numbers in logs | PCI | No | Strip before sending |
+| AWS account IDs | Internal | Partial | Mask in prompts |
+| Remediation actions taken | Internal | Audit log | Store in DynamoDB |
 
 ---
 
-## 10. Production Readiness Checklist
+### 9.2 PII Scrubbing Before Bedrock Calls
 
-Run through this before going live:
+```python
+# agents/pii_scrubber.py
+import re, logging
 
-### Security
-- [ ] IAM role uses least-privilege (no `*` actions in prod)
-- [ ] API Gateway has authentication (API key, IAM, or Cognito)
-- [ ] Lambda runs inside a VPC with private subnets
-- [ ] VPC endpoints configured for Bedrock, CloudWatch, Logs
-- [ ] Secrets in Secrets Manager (not env vars)
-- [ ] All env vars encrypted with KMS
-- [ ] PII scrubbing in place before Bedrock calls
-- [ ] S3 deployment bucket has versioning + encryption
+logger = logging.getLogger(__name__)
 
-### Reliability
-- [ ] Dead Letter Queue configured for async invocations
-- [ ] Bedrock timeout set (30s) + retry with backoff
-- [ ] Lambda timeout tested at 300s
-- [ ] Fallback mode tested (Bedrock unavailable)
-- [ ] Fallback mode tested (CloudWatch unavailable)
-- [ ] Idempotency implemented for duplicate requests
-- [ ] Circuit breaker in place for Bedrock calls
+PII_PATTERNS: list[tuple[str, str]] = [
+    (r'\b(?:\d[ -]?){13,16}\b',                                "[CARD_NUMBER]"),
+    (r'\b\d{3}-\d{2}-\d{4}\b',                                "[SSN]"),
+    (r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b', "[EMAIL]"),
+    (r'\b(?:\d{1,3}\.){3}\d{1,3}\b',                          "[IP_ADDR]"),
+    (r'\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b', "[PHONE]"),
+    (r'\b\d{12}\b',                                            "[AWS_ACCOUNT]"),
+    (r'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+', "[JWT_TOKEN]"),
+    (r'\b[A-Za-z0-9+/]{40,}={0,2}\b',                         "[SECRET_VALUE]"),
+]
 
-### Observability
+def scrub_pii(text: str) -> tuple[str, int]:
+    """Remove PII from text before sending to Bedrock. Returns (cleaned, count)."""
+    total = 0
+    for pattern, replacement in PII_PATTERNS:
+        text, count = re.subn(pattern, replacement, text)
+        if count > 0:
+            logger.info("PII scrubbed: %d x %s", count, replacement)
+            total += count
+    return text, total
+
+def scrub_log_events(events: list[dict]) -> list[dict]:
+    """Scrub PII from a list of CloudWatch log event dicts."""
+    result = []
+    for event in events:
+        msg, count = scrub_pii(event.get("message", ""))
+        result.append({**event, "message": msg,
+                       **({"pii_scrubbed": count} if count else {})})
+    return result
+```
+
+---
+
+### 9.3 Audit Trail in DynamoDB
+
+```python
+# agents/audit.py
+import boto3, json, time
+from datetime import datetime, timezone
+
+_dynamo = boto3.resource("dynamodb")
+
+def record_pipeline_run(result: dict) -> None:
+    """
+    Store audit record after every pipeline run.
+    Auto-deleted after 90 days via DynamoDB TTL.
+    """
+    _dynamo.Table("cloudops-incidents").put_item(Item={
+        "incident_id":         result.get("incident_id", "UNKNOWN"),
+        "start_time":          datetime.now(timezone.utc).isoformat(),
+        "severity":            result.get("severity"),
+        "status":              result.get("status"),
+        "overall_health":      result.get("pipeline_result", {}).get("overall_health"),
+        "anomalies_detected":  result.get("agent_reports", {})
+                                     .get("metrics", {})
+                                     .get("anomalies_detected", 0),
+        "actions_recommended": [
+            a.get("action_id")
+            for a in result.get("agent_reports", {})
+                           .get("remediation", {})
+                           .get("top_actions", [])
+        ],
+        "actions_auto_executed": result.get("agent_reports", {})
+                                       .get("remediation", {})
+                                       .get("auto_executed", []),
+        "pipeline_duration_s": result.get("performance", {})
+                                     .get("total_elapsed_seconds", 0),
+        "ttl": int(time.time()) + (90 * 24 * 3600),   # 90-day retention
+    })
+```
+
+Enable TTL:
+```
+DynamoDB -> cloudops-incidents -> Additional settings -> Time to Live
+-> TTL attribute: ttl -> Enable
+```
+
+---
+
+### 9.4 Bedrock Data Privacy
+
+```
+Key facts:
+  Bedrock does NOT train on your prompts or responses (by default)
+  Data encrypted in transit (TLS 1.2+) and at rest
+  Processed in your specified AWS region only
+
+Optional invocation logging (for debugging):
+  Bedrock -> Settings -> Model invocation logging -> S3 or CloudWatch
+  WARNING: logs your full prompts and responses
+  Only enable after confirming PII scrubbing is in place (section 9.2)
+
+For regulated industries (HIPAA, PCI, FedRAMP):
+  Request Bedrock PrivateLink from AWS Support
+  Compliance reports available via AWS Artifact
+```
+
+---
+
+### 9.5 Production Readiness Checklist
+
+**Security**
+- [ ] IAM role uses specific ARNs (no `Resource: "*"` in production)
+- [ ] API Gateway requires authentication (API key or IAM)
+- [ ] Lambda deployed in VPC with private subnets
+- [ ] VPC endpoints created for Bedrock, CloudWatch, SSM, Secrets Manager
+- [ ] All secrets in Secrets Manager (zero plaintext env vars for sensitive values)
+- [ ] Lambda env vars encrypted with KMS CMK
+- [ ] PII scrubbing enabled and tested with real production log samples
+- [ ] Gitleaks scanning passing in CI
+- [ ] Bandit static analysis passing in CI
+
+**Reliability**
+- [ ] Dead Letter Queue configured and alarmed on SQS depth > 0
+- [ ] Bedrock call timeout = 30s configured via botocore
+- [ ] Circuit breaker deployed for Bedrock calls
+- [ ] Idempotency tested with duplicate API Gateway requests
+- [ ] All 5 chaos engineering tests passing
+- [ ] Fallback mode verified: pipeline returns a result with Bedrock down
+
+**Observability**
 - [ ] Structured JSON logging enabled
-- [ ] Custom metrics emitted per pipeline stage
-- [ ] X-Ray tracing enabled
-- [ ] CloudWatch Dashboard created
-- [ ] Alarms set: errors, duration, throttles, cost
-- [ ] SNS topic → PagerDuty/Slack notifications confirmed
-- [ ] Log retention set to 30 days (not Never)
-- [ ] DLQ alarm configured
+- [ ] Custom metrics emitting per pipeline stage
+- [ ] X-Ray tracing enabled on Lambda alias
+- [ ] CloudWatch Dashboard created with 10 widgets
+- [ ] All 5 production alarms active and SNS notifications confirmed
+- [ ] Log retention set to 30 days
+- [ ] DLQ depth alarm configured
 
-### Performance
-- [ ] Provisioned concurrency set on `live` alias
-- [ ] Parallel agent execution enabled (Metrics + Log)
-- [ ] Deployment ZIP < 10 MB
-- [ ] Cold start < 2 seconds verified
-- [ ] p99 latency < 10 seconds under load
+**Performance**
+- [ ] Parallel agent execution enabled (stages 2 and 3)
+- [ ] Provisioned concurrency set on `live` alias (minimum 2)
+- [ ] Reserved concurrency set to 50
+- [ ] Cold start under 800ms verified
+- [ ] P99 pipeline duration under 10s verified under load
 
-### Cost
-- [ ] Per-agent model selection configured
-- [ ] Bedrock cost alarm set ($50/day threshold)
-- [ ] Log retention = 30 days
-- [ ] DynamoDB TTL set (90 days)
-- [ ] Monthly cost estimate documented and approved
+**Cost**
+- [ ] Per-agent model tiering configured (see section 5.1)
+- [ ] Bedrock cost alarm set at $10/day
+- [ ] DynamoDB TTL enabled at 90-day retention
+- [ ] Log retention confirmed at 30 days
+- [ ] Monthly cost estimate reviewed and approved
 
-### CI/CD
-- [ ] CI passes on all PRs (lint + typecheck + tests)
-- [ ] Coverage ≥ 75%
-- [ ] Staging deploy + smoke test automated
-- [ ] Blue/green alias deployment configured
-- [ ] Automated rollback on error spike
-- [ ] Secrets in GitHub Actions (not in code)
-- [ ] OIDC used (no stored AWS credentials)
+**CI/CD**
+- [ ] All CI checks passing: lint, typecheck, tests, coverage >= 75%
+- [ ] Blue/green deployment script tested end-to-end on staging
+- [ ] Automated rollback triggered and verified in staging
+- [ ] OIDC used for GitHub Actions (no stored AWS access keys)
+- [ ] Staging and production environment parity confirmed
 
-### Compliance
-- [ ] Audit trail in DynamoDB with TTL
-- [ ] Data classification documented
-- [ ] PII scrubbing tested with sample log data
-- [ ] Bedrock invocation logging decision documented
-- [ ] Post-incident process documented and practiced
+**AI and Compliance**
+- [ ] All prompt templates tested for consistent JSON output
+- [ ] Response validation running on every Bedrock call
+- [ ] Hallucination guard cross-checking AI claims against real metrics
+- [ ] Model versions pinned (no version-less IDs anywhere)
+- [ ] Audit trail writing to DynamoDB on every pipeline run
+- [ ] Data classification documented and reviewed by stakeholders
