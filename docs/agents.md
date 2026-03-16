@@ -8,7 +8,7 @@
 
 ```python
 IncidentAgent(
-    bedrock_model_id: str = "anthropic.claude-3-sonnet-20240229-v1:0",
+    bedrock_model_id: str = "amazon.nova-pro-v1:0",
     region_name: str = "us-east-1",
     max_tokens: int = 1024,
 )

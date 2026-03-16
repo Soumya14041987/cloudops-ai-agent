@@ -41,37 +41,8 @@ All four specialised agents share a rolling `IncidentContext` — a structured d
 
 ## Architecture
 
-```
-User / Operator
-      │
-      ▼
-Amazon API Gateway  (REST — POST /investigate)
-      │
-      ▼
-AWS Lambda          (app.lambda_handler — CloudOpsOrchestrator)
-      │
-      ▼
-Amazon Bedrock AgentCore Runtime  (Claude 3 Sonnet)
-      │
-  ┌───┼────────────────────────────────┐
-  │   │                                │
-  ▼   ▼                   ▼            ▼
-Incident  Log         Metrics    Remediation
-Agent     Agent       Agent      Agent
-  │   │                                │
-  └───┴──── Correlation Engine ────────┘
-                    │
-                    ▼
-          Final Recommendation
-                    │
-                    ▼
-          AgentCore Gateway
-      ┌───────┬────────┬──────────┐
-      ▼       ▼        ▼          ▼
-   CW Logs  CW Metrics DynamoDB  External APIs
-```
+![alt text](image.png)
 
----
 
 ## Agent Pipeline
 
