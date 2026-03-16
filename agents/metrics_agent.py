@@ -399,21 +399,12 @@ Provide a concise JSON object (no markdown fences) with:
   "confidence_level"       – LOW / MEDIUM / HIGH based on data quality
 """
         try:
-            body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens":        512,
-                "messages":          [{"role": "user", "content": prompt}],
-            })
-            response = # legacy - see adapter(
-                modelId     = self.model_id,
-                contentType = "application/json",
-                accept      = "application/json",
-                body        = body,
+            result = self._adapter.invoke_json(
+                model_id   = self.model_id,
+                prompt     = prompt,
+                max_tokens = 512,
             )
-            raw_text = json.loads(response["body"].read())
-            content  = raw_text.get("content", [{}])[0].get("text", "")
-            parsed   = json.loads(content)
-            return json.dumps(parsed, indent=2)
+            return json.dumps(result, indent=2)
         except Exception as exc:
             logger.warning("Bedrock metrics interpretation failed: %s", exc)
             anom_summary = "; ".join(a["description"] for a in anomalies[:3]) or "None"

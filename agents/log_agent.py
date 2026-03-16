@@ -411,21 +411,12 @@ Return a JSON object (no markdown fences) with:
   "next_investigation"     – what additional data would confirm/deny the hypothesis
 """
         try:
-            body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens":        768,
-                "messages":          [{"role": "user", "content": prompt}],
-            })
-            response = # legacy - see adapter(
-                modelId     = self.model_id,
-                contentType = "application/json",
-                accept      = "application/json",
-                body        = body,
+            result = self._adapter.invoke_json(
+                model_id   = self.model_id,
+                prompt     = prompt,
+                max_tokens = 768,
             )
-            raw     = json.loads(response["body"].read())
-            content = raw.get("content", [{}])[0].get("text", "")
-            parsed  = json.loads(content)
-            return json.dumps(parsed, indent=2)
+            return json.dumps(result, indent=2)
         except Exception as exc:
             logger.warning("Bedrock hypothesis failed: %s", exc)
             top_pattern_names = [p["pattern_name"] for p in top_patterns[:3]]

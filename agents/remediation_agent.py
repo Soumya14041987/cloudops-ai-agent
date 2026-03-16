@@ -504,21 +504,12 @@ Produce a JSON object (no markdown fences) with:
   "confidence_overall"   – LOW / MEDIUM / HIGH
 """
         try:
-            body = json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens":        1024,
-                "messages":          [{"role": "user", "content": prompt}],
-            })
-            response = # legacy - see adapter(
-                modelId     = self.model_id,
-                contentType = "application/json",
-                accept      = "application/json",
-                body        = body,
+            result = self._adapter.invoke_json(
+                model_id   = self.model_id,
+                prompt     = prompt,
+                max_tokens = 1024,
             )
-            raw     = json.loads(response["body"].read())
-            content = raw.get("content", [{}])[0].get("text", "")
-            parsed  = json.loads(content)
-            return json.dumps(parsed, indent=2)
+            return json.dumps(result, indent=2)
         except Exception as exc:
             logger.warning("Bedrock final recommendation failed: %s", exc)
             action_ids = [a.action_id for a in top_actions]

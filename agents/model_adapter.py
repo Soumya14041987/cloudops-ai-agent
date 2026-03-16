@@ -122,7 +122,11 @@ def build_claude_body(prompt: str, max_tokens: int, system_prompt: str = "") -> 
 
 
 def build_nova_body(prompt: str, max_tokens: int, system_prompt: str = "") -> dict:
-    """Amazon Nova — Converse-style Messages API."""
+    """
+    Amazon Nova — invoke_model schema.
+    Nova uses messages array with inferenceConfig (NOT max_tokens at top level).
+    Ref: https://docs.aws.amazon.com/nova/latest/userguide/complete-request-schema.html
+    """
     body: dict = {
         "messages": [
             {
@@ -132,7 +136,8 @@ def build_nova_body(prompt: str, max_tokens: int, system_prompt: str = "") -> di
         ],
         "inferenceConfig": {
             "maxTokens":   max_tokens,
-            "temperature": 0.0,
+            "temperature": 0.1,
+            "topP":        0.9,
         },
     }
     if system_prompt:
@@ -194,15 +199,27 @@ def parse_claude_response(response_body: dict) -> str:
 
 
 def parse_nova_response(response_body: dict) -> str:
-    """Extract text from Amazon Nova response."""
-    # Nova uses the Converse API format
-    output = response_body.get("output", {})
-    message = output.get("message", {})
-    content = message.get("content", [])
-    if content and isinstance(content, list):
-        return content[0].get("text", "")
-    # Fallback: some Nova versions use different structure
-    return response_body.get("outputText", "")
+    """
+    Extract text from Amazon Nova invoke_model response.
+    Nova returns: {"output": {"message": {"role": "assistant", "content": [{"text": "..."}]}}}
+    """
+    # Primary path: output.message.content[0].text
+    try:
+        output = response_body.get("output", {})
+        message = output.get("message", {})
+        content = message.get("content", [])
+        if content and isinstance(content, list):
+            text = content[0].get("text", "")
+            if text:
+                return text
+    except (KeyError, IndexError, TypeError):
+        pass
+    # Fallback paths for different Nova versions
+    if "outputText" in response_body:
+        return response_body["outputText"]
+    # Last resort: stringify the whole body
+    logger.warning("Could not parse Nova response — dumping body: %s", str(response_body)[:200])
+    return str(response_body)
 
 
 def parse_titan_response(response_body: dict) -> str:
